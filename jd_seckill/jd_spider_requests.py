@@ -29,6 +29,7 @@ from .util import (
 
 )
 
+from datetime import datetime, timedelta
 
 class SpiderSession:
     """
@@ -297,9 +298,11 @@ class JdTdudfp:
         try:
             from pyppeteer import launch
             url = "https://www.jd.com/"
-            browser = await launch(userDataDir=".user_data", args=['--start-maximized',
-                                                                   '--no-sandbox', '--disable-setuid-sandbox'])
+            browser = await launch(userDataDir=".user_data", autoClose=True,
+                                   args=['--start-maximized', '--no-sandbox', '--disable-setuid-sandbox'])
             page = await browser.newPage()
+            # 有些页面打开慢，这里设置时间长一点，360秒
+            page.setDefaultNavigationTimeout(360 * 1000)
             await page.setViewport({"width": 1920, "height": 1080})
             await page.setUserAgent(self.user_agent)
             for key, value in self.cookies.items():
@@ -322,7 +325,7 @@ class JdTdudfp:
             await page.goto(a_href)
             await page.waitFor(".goods_item_link")
             logger.info("page_title：【%s】, page_url：【%s】" % (await page.title(), page.url))
-            a_href = await page.querySelectorAllEval(".goods_item_link", "(elements) => elements[0].href")
+            a_href = await page.querySelectorAllEval(".goods_item_link", "(elements) => elements[{}].href".format(str(random.randint(1,20))))
             await page.goto(a_href)
             await page.waitFor("#InitCartUrl")
             logger.info("page_title：【%s】, page_url：【%s】" % (await page.title(), page.url))
@@ -334,7 +337,7 @@ class JdTdudfp:
             await page.goto(a_href)
             await page.waitFor(".common-submit-btn")
             logger.info("page_title：【%s】, page_url：【%s】" % (await page.title(), page.url))
-
+            
             await page.click(".common-submit-btn")
             await page.waitFor("#sumPayPriceId")
             logger.info("page_title：【%s】, page_url：【%s】" % (await page.title(), page.url))
@@ -372,6 +375,8 @@ class JdSeckill(object):
         self.session = self.spider_session.get_session()
         self.user_agent = self.spider_session.user_agent
         self.nick_name = None
+
+        self.running_flag = True
 
     def login_by_qrcode(self):
         """
@@ -444,15 +449,32 @@ class JdSeckill(object):
         """
         抢购
         """
-        while True:
+        while self.running_flag:
+            self.seckill_canstill_running()
             try:
                 self.request_seckill_url()
-                while True:
+                while self.running_flag:
                     self.request_seckill_checkout_page()
                     self.submit_seckill_order()
+                    self.seckill_canstill_running()
             except Exception as e:
                 logger.info('抢购发生异常，稍后继续执行！', e)
             wait_some_time()
+
+    def seckill_canstill_running(self):
+        """用config.ini文件中的continue_time加上函数buytime_get()获取到的buy_time，
+            来判断抢购的任务是否可以继续运行
+        """
+        buy_time = self.timers.buytime_get()
+        continue_time = int(global_config.getRaw('config','continue_time'))
+        stop_time = datetime.strptime(
+            (buy_time + timedelta(minutes=continue_time)).strftime("%Y-%m-%d %H:%M:%S.%f"),
+            "%Y-%m-%d %H:%M:%S.%f"
+        )
+        current_time = datetime.now()
+        if current_time > stop_time:
+            self.running_flag = False
+            logger.info('超过允许的运行时间，任务结束。')
 
     def make_reserve(self):
         """商品预约"""
@@ -470,7 +492,7 @@ class JdSeckill(object):
         resp = self.session.get(url=url, params=payload, headers=headers)
         resp_json = parse_json(resp.text)
         reserve_url = resp_json.get('url')
-        self.timers.start()
+        
         while True:
             try:
                 self.session.get(url='https:' + reserve_url)
@@ -655,7 +677,7 @@ class JdSeckill(object):
             'token': token,
             'pru': ''
         }
-        logger.info("order_date：{}", data)
+        logger.info("order_date：%s", data)
         return data
 
     def submit_seckill_order(self):
@@ -706,6 +728,7 @@ class JdSeckill(object):
             if global_config.getRaw('messenger', 'server_chan_enable') == 'true':
                 success_message = "抢购成功，订单号:{}, 总价:{}, 电脑端付款链接:{}".format(order_id, total_money, pay_url)
                 send_wechat(success_message)
+                self.running_flag = False
             return True
         else:
             logger.info('抢购失败，返回信息:{}'.format(resp_json))
